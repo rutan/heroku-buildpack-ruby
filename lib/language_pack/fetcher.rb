@@ -35,7 +35,7 @@ module LanguagePack
     end
 
     def curl_timeout_in_seconds
-      ENV['CURL_TIMEOUT'] || 30
+      ENV['CURL_TIMEOUT'] || 300
     end
 
     def curl_connect_timeout_in_seconds
