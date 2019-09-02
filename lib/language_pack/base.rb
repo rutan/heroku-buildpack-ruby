@@ -4,32 +4,37 @@ require "yaml"
 require "digest/sha1"
 require "language_pack/shell_helpers"
 require "language_pack/cache"
+require "language_pack/helpers/bundler_cache"
 require "language_pack/metadata"
 require "language_pack/fetcher"
 require "language_pack/instrument"
 
 Encoding.default_external = Encoding::UTF_8 if defined?(Encoding)
+ENV["BPLOG_PREFIX"] = "buildpack.ruby"
 
 # abstract class that all the Ruby based Language Packs inherit from
 class LanguagePack::Base
   include LanguagePack::ShellHelpers
+  extend LanguagePack::ShellHelpers
 
-  VENDOR_URL = ENV['BUILDPACK_VENDOR_URL'] || "https://s3-external-1.amazonaws.com/heroku-buildpack-ruby"
+  VENDOR_URL           = ENV['BUILDPACK_VENDOR_URL'] || "https://s3-external-1.amazonaws.com/heroku-buildpack-ruby"
+  DEFAULT_LEGACY_STACK = "cedar"
+  ROOT_DIR             = File.expand_path("../../..", __FILE__)
 
-  attr_reader :build_path, :cache
+  attr_reader :build_path, :cache, :stack
 
   # changes directory to the build_path
   # @param [String] the path of the build dir
   # @param [String] the path of the cache dir this is nil during detect and release
   def initialize(build_path, cache_path=nil)
      self.class.instrument "base.initialize" do
-      @build_path   = build_path
-      @cache        = LanguagePack::Cache.new(cache_path) if cache_path
-      @metadata     = LanguagePack::Metadata.new(@cache)
-      @id           = Digest::SHA1.hexdigest("#{Time.now.to_f}-#{rand(1000000)}")[0..10]
-      @warnings     = []
-      @deprecations = []
-      @fetchers     = {:buildpack => LanguagePack::Fetcher.new(VENDOR_URL) }
+      @build_path    = build_path
+      @stack         = ENV.fetch("STACK")
+      @cache         = LanguagePack::Cache.new(cache_path) if cache_path
+      @metadata      = LanguagePack::Metadata.new(@cache)
+      @bundler_cache = LanguagePack::BundlerCache.new(@cache, @stack)
+      @id            = Digest::SHA1.hexdigest("#{Time.now.to_f}-#{rand(1000000)}")[0..10]
+      @fetchers      = {:buildpack => LanguagePack::Fetcher.new(VENDOR_URL) }
 
       Dir.chdir build_path
     end
@@ -76,15 +81,20 @@ class LanguagePack::Base
   def compile
     write_release_yaml
     instrument 'base.compile' do
-      if @warnings.any?
-        topic "WARNINGS:"
-        puts @warnings.join("\n")
+      Kernel.puts ""
+      warnings.each do |warning|
+        Kernel.puts "\e[1m\e[33m###### WARNING:\e[0m"# Bold yellow
+        Kernel.puts ""
+        puts warning
+        Kernel.puts ""
       end
-      if @deprecations.any?
+      if deprecations.any?
         topic "DEPRECATIONS:"
         puts @deprecations.join("\n")
       end
+      Kernel.puts ""
     end
+    mcount "success"
   end
 
   def write_release_yaml
@@ -97,12 +107,18 @@ class LanguagePack::Base
       f.write(release.to_yaml)
     end
 
-    unless File.exist?("Procfile")
-      msg =  "No Procfile detected, using the default web server (webrick)\n"
-      msg << "https://devcenter.heroku.com/articles/ruby-default-web-server"
-      warn msg
-    end
+    warn_webserver
   end
+
+  def warn_webserver
+    return if File.exist?("Procfile")
+    msg =  "No Procfile detected, using the default web server.\n"
+    msg << "We recommend explicitly declaring how to boot your server process via a Procfile.\n"
+    msg << "https://devcenter.heroku.com/articles/ruby-default-web-server"
+    warn msg
+  end
+
+
 
   # log output
   # Ex. log "some_message", "here", :someattr="value"
@@ -120,8 +136,9 @@ class LanguagePack::Base
         log_internal args, :status => "complete", :finish => finish, :elapsed => (finish - start)
         return ret
       rescue StandardError => ex
-        finish = Time.now.to_f
-        log_internal args, :status => "error", :finish => finish, :elapsed => (finish - start), :message => ex.message
+        finish  = Time.now.to_f
+        message = Shellwords.escape(ex.message)
+        log_internal args, :status => "error", :finish => finish, :elapsed => (finish - start), :message => message
         raise ex
       end
     end
@@ -148,6 +165,21 @@ private ##################################
     add_to_profiled %{export #{key}="#{val.gsub('"','\"')}"}
   end
 
+  def add_to_export(string)
+    export = File.join(ROOT_DIR, "export")
+    File.open(export, "a") do |file|
+      file.puts string
+    end
+  end
+
+  def set_export_default(key, val)
+    add_to_export "export #{key}=${#{key}:-#{val}}"
+  end
+
+  def set_export_override(key, val)
+    add_to_export %{export #{key}="#{val.gsub('"','\"')}"}
+  end
+
   def log_internal(*args)
     message = build_log_message(args)
     %x{ logger -p user.notice -t "slugc[$$]" "buildpack-ruby #{message}" }
@@ -164,4 +196,3 @@ private ##################################
     end.join(" ")
   end
 end
-
